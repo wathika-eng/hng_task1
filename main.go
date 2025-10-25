@@ -2,141 +2,275 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"log"
-	"log/slog"
+	"strconv"
 	"strings"
-	"time"
+
+	"hng1/database"
 
 	"github.com/gofiber/fiber/v2"
-	_ "github.com/mattn/go-sqlite3"
-	"xorm.io/xorm"
 )
 
-type Value struct {
-	Input     string    `xorm:"input not null unique" json:"input"`
-	CreatedAt time.Time `xorm:"created_at created" json:"created_at"`
-}
-
-// var engine *xorm.Engine
+var store *database.Store
 
 func main() {
-	logger := slog.Default()
-	logger.Info("starting...")
-
-	var err error
-	engine, err := xorm.NewEngine("sqlite3", "strings.db")
-
-	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
-	}
-
-	if err := engine.Ping(); err != nil {
-		log.Fatalf("failed to ping database: %v", err)
-	}
-
-	if err := engine.Sync2(new(Value)); err != nil {
-		log.Fatalf("failed to sync database schema: %v", err)
-	}
-
-	defer engine.Close()
+	store = database.NewStore()
 
 	app := fiber.New(fiber.Config{
-		ServerHeader: "hng2",
-		AppName:      "HNG Task 2",
-		ETag:         true,
-		WriteTimeout: time.Duration(3000),
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			// Default code is 500
+			code := fiber.StatusInternalServerError
+			var msg interface{} = "Internal Server Error"
+
+			// Check if it's a *fiber.Error
+			if e, ok := err.(*fiber.Error); ok {
+				code = e.Code
+				msg = e.Message
+			}
+
+			// Log the error (like Echo)
+			fmt.Printf("Error: %v\n", err)
+
+			// Otherwise, send JSON
+			return c.Status(code).JSON(fiber.Map{
+				"error": msg,
+			})
+		},
 	})
 
-	app.Get("/healthz", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"time": time.Now().Local(), "status": "okay"})
-	})
+	app.Post("/strings", createString)
+	app.Get("/strings/:value", getString)
+	app.Get("/strings", listStrings)
+	app.Get("/strings/filter-by-natural-language", naturalFilter)
+	app.Delete("/strings/:value", deleteString)
 
-	app.Post("/strings", func(c *fiber.Ctx) error {
-		// bind to struct
-		var val Value
-		if err := c.BodyParser(&val); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cannot parse JSON"})
+	app.Listen(":3000")
+}
+
+type createReq struct {
+	Value interface{} `json:"value"`
+}
+
+func createString(c *fiber.Ctx) error {
+	var req createReq
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	if req.Value == nil {
+		return fiber.NewError(fiber.StatusBadRequest, `missing "value" field`)
+	}
+	s, ok := req.Value.(string)
+	if !ok {
+		return fiber.NewError(fiber.StatusUnprocessableEntity, `"value" must be a string`)
+	}
+	if strings.TrimSpace(s) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, `"value" must not be empty`)
+	}
+
+	v, err := database.AnalyzeString(s)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "analysis failed")
+	}
+	if err := store.Save(v); err != nil {
+		if err == database.ErrExists {
+			return fiber.NewError(fiber.StatusConflict, "string already exists")
 		}
-		// validate input
-		if c.Body() == nil || strings.Trim(val.Input, " ") == "" || len(val.Input) <= 0 || len(val.Input) > 500 {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "input must be a non-empty string with a maximum length of 500 characters"})
-		}
+		return fiber.NewError(fiber.StatusInternalServerError, "storage error")
+	}
+	return c.Status(fiber.StatusCreated).JSON(v)
+}
 
-		cleanedInput := strings.Trim(val.Input, " ")
+func getString(c *fiber.Ctx) error {
+	raw := c.Params("value")
+	if raw == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "missing value param")
+	}
+	// URL param will be encoded by client; decode not needed here as Fiber gives decoded value
+	v, ok := store.GetByValue(raw)
+	if !ok {
+		return fiber.NewError(fiber.StatusNotFound, "string not found")
+	}
+	return c.Status(fiber.StatusOK).JSON(v)
+}
 
-		lenInput := len(cleanedInput)
-		pal := isPalindrome(cleanedInput)
-		sha := sha256Hash(cleanedInput)
-		uniqChars := uniqueCharacters(cleanedInput)
-		wordCnt := wordCount(cleanedInput)
-		charFreqMap := characterFrequencyMap(cleanedInput)
-
-		response := fiber.Map{
-			"id":    sha,
-			"value": cleanedInput,
-			"properties": fiber.Map{
-				"length":                  lenInput,
-				"is_palindrome":           pal,
-				"sha256_hash":             sha,
-				"unique_characters":       uniqChars,
-				"word_count":              wordCnt,
-				"character_frequency_map": charFreqMap,
-			},
-			"created_at": time.Now().Format(time.RFC3339),
-		}
-
-		data, err := engine.Insert(&val)
+func listStrings(c *fiber.Ctx) error {
+	// parse query params
+	q := c.Query("is_palindrome")
+	var isPal *bool
+	if q != "" {
+		b, err := strconv.ParseBool(q)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to save to database"})
+			return fiber.NewError(fiber.StatusBadRequest, "invalid is_palindrome")
 		}
+		isPal = &b
+	}
+	minLenStr := c.Query("min_length")
+	maxLenStr := c.Query("max_length")
+	var minLen, maxLen *int
+	if minLenStr != "" {
+		v, err := strconv.Atoi(minLenStr)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid min_length")
+		}
+		minLen = &v
+	}
+	if maxLenStr != "" {
+		v, err := strconv.Atoi(maxLenStr)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid max_length")
+		}
+		maxLen = &v
+	}
+	wcStr := c.Query("word_count")
+	var wc *int
+	if wcStr != "" {
+		v, err := strconv.Atoi(wcStr)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid word_count")
+		}
+		wc = &v
+	}
+	contains := c.Query("contains_character")
 
-		logger.Info("inserted: ", "data", data)
-
-		return c.JSON(response)
-	})
-
-	// app.Get("/strings/{}")
-
-	app.Listen(":8000")
+	all := store.GetAll()
+	out := make([]*database.Value, 0)
+	for _, v := range all {
+		p := v.Properties
+		if isPal != nil && p.Palindrome != *isPal {
+			continue
+		}
+		if minLen != nil && p.Length < *minLen {
+			continue
+		}
+		if maxLen != nil && p.Length > *maxLen {
+			continue
+		}
+		if wc != nil && p.WordCount != *wc {
+			continue
+		}
+		if contains != "" {
+			if !strings.Contains(v.Value, contains) {
+				continue
+			}
+		}
+		out = append(out, v)
+	}
+	resp := fiber.Map{
+		"data":  out,
+		"count": len(out),
+		"filters_applied": map[string]interface{}{
+			"is_palindrome":      q,
+			"min_length":         minLenStr,
+			"max_length":         maxLenStr,
+			"word_count":         wcStr,
+			"contains_character": contains,
+		},
+	}
+	return c.Status(fiber.StatusOK).JSON(resp)
 }
 
-// is_palindrome: Boolean indicating if the string reads the same forwards and backwards (case-insensitive)
-func isPalindrome(s string) bool {
-	for i := 0; i < len(s)/2; i++ {
-		if s[i] != s[len(s)-1-i] {
-			return false
+func naturalFilter(c *fiber.Ctx) error {
+	q := c.Query("query")
+	if q == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "missing query param")
+	}
+	// very small heuristic parser
+	parsed := map[string]interface{}{}
+	lq := strings.ToLower(q)
+	if strings.Contains(lq, "single word") || strings.Contains(lq, "single-word") {
+		parsed["word_count"] = 1
+	}
+	if strings.Contains(lq, "palind") {
+		parsed["is_palindrome"] = true
+	}
+	// "longer than N" or "longer than 10 characters"
+	if strings.Contains(lq, "longer than") {
+		parts := strings.Split(lq, "longer than")
+		if len(parts) > 1 {
+			tail := strings.TrimSpace(parts[1])
+			// pick first number we find
+			fields := strings.Fields(tail)
+			for _, f := range fields {
+				if n, err := strconv.Atoi(f); err == nil {
+					parsed["min_length"] = n + 0
+					break
+				}
+			}
 		}
 	}
-	return true
-}
-
-// unique_characters: Count of distinct characters in the string
-func uniqueCharacters(s string) int {
-	charMap := make(map[rune]bool)
-	for _, char := range s {
-		charMap[char] = true
+	// contains the letter X
+	if strings.Contains(lq, "contain") || strings.Contains(lq, "containing") {
+		// look for single-letter tokens
+		for _, tok := range strings.Fields(lq) {
+			if len(tok) == 1 && tok >= "a" && tok <= "z" {
+				parsed["contains_character"] = tok
+				break
+			}
+		}
 	}
-	return len(charMap)
-}
 
-// word_count: Number of words separated by whitespace
-func wordCount(s string) int {
-	words := strings.Fields(s)
-	return len(words)
-}
-
-// sha256_hash: SHA-256 hash of the string for unique identification
-func sha256Hash(s string) string {
-	hash := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", hash)
-}
-
-// character_frequency_map: Object/dictionary mapping each character to its occurrence count
-func characterFrequencyMap(s string) map[rune]int {
-	freqMap := make(map[rune]int)
-	for _, char := range s {
-		freqMap[char]++
+	if len(parsed) == 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "unable to parse natural language query")
 	}
-	return freqMap
+
+	// now filter the store using parsed
+	all := store.GetAll()
+	out := make([]*database.Value, 0)
+	for _, v := range all {
+		ok := true
+		if val, found := parsed["word_count"]; found {
+			if v.Properties.WordCount != val.(int) {
+				ok = false
+			}
+		}
+		if val, found := parsed["is_palindrome"]; found {
+			if v.Properties.Palindrome != val.(bool) {
+				ok = false
+			}
+		}
+		if val, found := parsed["min_length"]; found {
+			if v.Properties.Length < val.(int) {
+				ok = false
+			}
+		}
+		if val, found := parsed["contains_character"]; found {
+			if !strings.Contains(v.Value, val.(string)) {
+				ok = false
+			}
+		}
+		if ok {
+			out = append(out, v)
+		}
+	}
+
+	resp := fiber.Map{
+		"data":  out,
+		"count": len(out),
+		"interpreted_query": fiber.Map{
+			"original":       q,
+			"parsed_filters": parsed,
+		},
+	}
+	return c.Status(fiber.StatusOK).JSON(resp)
+}
+
+func deleteString(c *fiber.Ctx) error {
+	raw := c.Params("value")
+	if raw == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "missing value param")
+	}
+	if err := store.DeleteByValue(raw); err != nil {
+		if err == database.ErrNotFound {
+			return fiber.NewError(fiber.StatusNotFound, "string not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, "delete failed")
+	}
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// helper for testing uniqueness of hash if needed
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
 }
