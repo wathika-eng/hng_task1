@@ -18,15 +18,16 @@ type Properties struct {
 	UniqueChars int            `json:"unique_characters"`
 	WordCount   int            `json:"word_count"`
 	SHA256      string         `json:"sha256_hash"`
-	CharFreqMap datatypes.JSON `json:"character_frequency_map"`
+	CharFreqMap datatypes.JSON `json:"character_frequency_map" gorm:"type:jsonb"`
 }
 
 // Struct for storing user-submitted values
 type Value struct {
-	ID         string     `json:"id"`
-	Value      string     `json:"value"`
-	Properties Properties `json:"properties"`
-	CreatedAt  time.Time  `json:"created_at"`
+	// Use SHA256 as primary key to match spec
+	ID         string     `gorm:"primaryKey;type:char(64)" json:"id"`
+	Value      string     `gorm:"uniqueIndex;not null" json:"value"`
+	Properties Properties `gorm:"embedded" json:"properties"`
+	CreatedAt  time.Time  `gorm:"autoCreateTime" json:"created_at"`
 }
 
 // AnalyzeString computes Properties for a given input string and returns a Value

@@ -17,17 +17,19 @@ func InitDB() (*gorm.DB, error) {
 	if dbUrl == "" {
 		log.Println("missing database url in .env")
 	}
-
 	db, err := gorm.Open(postgres.Open(dbUrl), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("error connecting to db: %v", err.Error())
+		return nil, err
 	}
-	sqldb, _ := db.DB()
+	sqldb, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
 	if err := sqldb.Ping(); err != nil {
-		log.Fatalf("error pinging the db: %v", err.Error())
+		return nil, err
 	}
 	if err := db.AutoMigrate(Value{}); err != nil {
-		log.Fatalf("error pinging the db: %v", err.Error())
+		return nil, err
 	}
 	return db, nil
 }

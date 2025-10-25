@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -12,10 +13,23 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-var store *database.Store
+var store database.StoreInterface
 
 func main() {
-	store = database.NewStore()
+	// try to initialize Postgres-backed store when DATABASE_URL is set
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL != "" {
+		db, err := database.InitDB()
+		if err == nil && db != nil {
+			store = database.NewGormStore(db)
+			fmt.Println("Using Postgres-backed store")
+		} else {
+			fmt.Printf("DB init failed, falling back to in-memory store: %v\n", err)
+			store = database.NewStore()
+		}
+	} else {
+		store = database.NewStore()
+	}
 
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
@@ -40,9 +54,11 @@ func main() {
 	})
 
 	app.Post("/strings", createString)
-	app.Get("/strings/:value", getString)
-	app.Get("/strings", listStrings)
+	// register specific/static routes first
 	app.Get("/strings/filter-by-natural-language", naturalFilter)
+	app.Get("/strings", listStrings)
+	// parameterized route should come after specific ones
+	app.Get("/strings/:value", getString)
 	app.Delete("/strings/:value", deleteString)
 
 	app.Listen(":3000")

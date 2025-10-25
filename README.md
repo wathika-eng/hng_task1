@@ -23,6 +23,26 @@ go run ./
 
 Server listens on :3000
 
+### Using Postgres via .env
+
+You can enable Postgres-backed persistence by providing a `DATABASE_URL` in a `.env` file at the project root. Example `.env`:
+
+```env
+DATABASE_URL="postgres://user:pass@localhost:5432/stringsdb"
+```
+
+The app will attempt to connect and auto-migrate the `Value` model. If the database does not exist, either create it beforehand or the app will fall back to the in-memory store. To create the database using `psql`:
+
+```bash
+PGPASSWORD="your_db_password" psql "postgres://user:pass@localhost:5432/postgres" -c "CREATE DATABASE stringsdb;"
+```
+
+Then start the server with the `.env` file in place:
+
+```bash
+go run ./
+```
+
 ## Example curl
 
 Create:
