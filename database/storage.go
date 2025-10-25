@@ -51,6 +51,14 @@ func (s *Store) GetByValue(value string) (*Value, bool) {
 	return v, ok
 }
 
+// GetByHash returns a Value by its SHA256 id
+func (s *Store) GetByHash(hash string) (*Value, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.byHash[hash]
+	return v, ok
+}
+
 func (s *Store) GetAll() []*Value {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

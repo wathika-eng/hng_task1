@@ -89,7 +89,11 @@ func getString(c *fiber.Ctx) error {
 	// URL param will be encoded by client; decode not needed here as Fiber gives decoded value
 	v, ok := store.GetByValue(raw)
 	if !ok {
-		return fiber.NewError(fiber.StatusNotFound, "string not found")
+		// try by hash id as fallback
+		v, ok = store.GetByHash(raw)
+		if !ok {
+			return fiber.NewError(fiber.StatusNotFound, "string not found")
+		}
 	}
 	return c.Status(fiber.StatusOK).JSON(v)
 }
@@ -193,19 +197,33 @@ func naturalFilter(c *fiber.Ctx) error {
 			fields := strings.Fields(tail)
 			for _, f := range fields {
 				if n, err := strconv.Atoi(f); err == nil {
-					parsed["min_length"] = n + 0
+					// "longer than 10" -> min_length = 11
+					parsed["min_length"] = n + 1
 					break
 				}
 			}
 		}
 	}
 	// contains the letter X
-	if strings.Contains(lq, "contain") || strings.Contains(lq, "containing") {
-		// look for single-letter tokens
-		for _, tok := range strings.Fields(lq) {
-			if len(tok) == 1 && tok >= "a" && tok <= "z" {
-				parsed["contains_character"] = tok
-				break
+	if strings.Contains(lq, "contain") || strings.Contains(lq, "containing") || strings.Contains(lq, "containing the") {
+		// handle "contain the first vowel"
+		if strings.Contains(lq, "first vowel") {
+			parsed["contains_character"] = "a"
+		} else {
+			// look for single-letter tokens or "letter x"
+			toks := strings.Fields(lq)
+			for i, tok := range toks {
+				if len(tok) == 1 && tok >= "a" && tok <= "z" {
+					parsed["contains_character"] = tok
+					break
+				}
+				if tok == "letter" && i+1 < len(toks) {
+					next := toks[i+1]
+					if len(next) == 1 && next >= "a" && next <= "z" {
+						parsed["contains_character"] = next
+						break
+					}
+				}
 			}
 		}
 	}
